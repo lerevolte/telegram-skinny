@@ -1,0 +1,191 @@
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: fitness_bot_postgres
+    environment:
+      POSTGRES_DB: fitness_bot
+      POSTGRES_USER: fitness_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - fitness_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fitness_user -d fitness_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis для кеша и FSM storage
+  redis:
+    image: redis:7-alpine
+    container_name: fitness_bot_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - fitness_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Telegram Bot
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: fitness_bot_telegram
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD}@postgres:5432/fitness_bot
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./bot:/app/bot
+      - ./core:/app/core
+      - ./logs:/app/logs
+    networks:
+      - fitness_network
+    restart: unless-stopped
+
+  # FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fitness_bot_api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD}@postgres:5432/fitness_bot
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./api:/app/api
+      - ./core:/app/core
+      - ./logs:/app/logs
+    networks:
+      - fitness_network
+    restart: unless-stopped
+
+  # Celery Worker для фоновых задач
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: fitness_bot_worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD}@postgres:5432/fitness_bot
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app/workers
+      - ./core:/app/core
+      - ./logs:/app/logs
+    networks:
+      - fitness_network
+    restart: unless-stopped
+    command: celery -A workers.celery_app worker --loglevel=info
+
+  # Celery Beat для периодических задач
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: fitness_bot_beat
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD}@postgres:5432/fitness_bot
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app/workers
+      - ./core:/app/core
+      - ./logs:/app/logs
+    networks:
+      - fitness_network
+    restart: unless-stopped
+    command: celery -A workers.celery_app beat --loglevel=info
+
+  # Flower для мониторинга Celery (опционально)
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: fitness_bot_flower
+    env_file:
+      - .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    networks:
+      - fitness_network
+    command: celery -A workers.celery_app flower --port=5555
+
+  # Nginx (для production)
+  nginx:
+    image: nginx:alpine
+    container_name: fitness_bot_nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+      - bot
+    networks:
+      - fitness_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  fitness_network:
+    driver: bridge
