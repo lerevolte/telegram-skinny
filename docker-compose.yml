@@ -10,7 +10,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     networks:
       - fitness_network
     healthcheck:
@@ -45,7 +45,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD:-strongpassword}@postgres:5432/fitness_bot
+      DATABASE_URL: postgresql+asyncpg://fitness_user:${DB_PASSWORD:-strongpassword}@postgres:5433/fitness_bot
       REDIS_HOST: redis
       REDIS_PORT: 6379
     depends_on:
